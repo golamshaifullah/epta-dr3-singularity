@@ -1,7 +1,7 @@
 # This is the repo containing recipes to build contianers for epta dr3 analysis. The included software and their versions are:
 
 |Software	|url	|version / git-hash	|submitter	|comment|
-------------------------------------------------------------------------|
+|-----------------------------------------------------------------------|
 |	|	|	|	||
 |Tempo2	|https://github.com/ipta/tempo2.git	|b6cd5b164f6bc519a40e76744fd5bf0543c88815	|golam	|safer to still use additional clockfiles from telescope owners|
 |calceph	|https://calceph.imcce.fr/	|5.0.1	|golam	||
