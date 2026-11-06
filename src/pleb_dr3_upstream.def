@@ -1,0 +1,191 @@
+Bootstrap: docker
+From: gcc:16.2.0-trixie
+
+%labels
+    Author Golam Shaifullah
+    Version epta-dr3-1
+    Software "EPTA DR3 Tempo2 and PLEB timing stack"
+    Tempo2Ref b6cd5b164f6bc519a40e76744fd5bf0543c88815
+    CALCEPHVersion 5.0.1
+    PGPLOTVersion 5.2.2
+    GCCVersion 16.2.0
+    OpenBLASVersion 0.3.34
+    FFTWVersion 3.3.11
+    BoostVersion 1.92.0
+    LAPACKVersion 3.12.1
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    export PREFIX=/opt/dr3
+    export TEMPO2_PREFIX=/opt/tempo2
+    export TEMPO2=/opt/tempo2/share/tempo2
+    export PATH=/opt/tempo2/bin:/opt/venv/bin:/opt/dr3/bin:/usr/local/bin:/usr/bin:/bin
+    export LD_LIBRARY_PATH=/opt/tempo2/lib:/opt/dr3/lib:${LD_LIBRARY_PATH:-}
+    export PKG_CONFIG_PATH=/opt/dr3/lib/pkgconfig:/opt/dr3/lib64/pkgconfig
+
+    TEMPO2_REPO=https://github.com/ipta/tempo2.git
+    TEMPO2_REF=b6cd5b164f6bc519a40e76744fd5bf0543c88815
+    CALCEPH_VERSION=5.0.1
+    OPENBLAS_VERSION=0.3.34
+    FFTW_VERSION=3.3.11
+    BOOST_VERSION=1.92.0
+    LAPACK_VERSION=3.12.1
+    LIBSTEMPO_REF=781642b4cbbcd22a987883044949b43a17fb62df
+    PLEB_REF=633771099c4595ec3d409d785d3dde315dbfaf1f
+    PQC_REF=516472bc0c1b642ffe8d81361a2758c25d1b10be
+    WHITENOISE_REF=133cbe9267fa9e1d840283a5cebf70f8ecdbed96
+
+    sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' \
+        /etc/apt/sources.list.d/debian.sources
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        autoconf automake bash ca-certificates cmake curl git libtool m4 make \
+        pkg-config python3 python3-dev python3-venv pgplot5 libx11-dev \
+        libxaw7-dev libxt-dev libpng-dev zlib1g-dev libcfitsio-dev \
+        libgsl-dev libltdl-dev
+    test "$(gcc -dumpfullversion)" = "16.2.0"
+    test "$(gfortran -dumpfullversion)" = "16.2.0"
+    dpkg-query -W -f='${Version}\n' pgplot5 | grep '^5.2.2'
+    mkdir -p /build "$PREFIX" "$TEMPO2_PREFIX" /opt/container-metadata
+
+    cd /build
+    # Reference-LAPACK's tagged release source (not the distribution package).
+    curl --fail --location --retry 3 \
+        "https://github.com/Reference-LAPACK/lapack/archive/refs/tags/v${LAPACK_VERSION}.tar.gz" \
+        -o lapack.tar.gz
+    tar -xzf lapack.tar.gz
+    cmake -S "lapack-${LAPACK_VERSION}" -B lapack-build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DBUILD_SHARED_LIBS=ON -DCBLAS=ON -DLAPACKE=ON
+    cmake --build lapack-build -j"$(nproc)"
+    cmake --install lapack-build
+
+    git clone --depth 1 --branch "v${OPENBLAS_VERSION}" \
+        https://github.com/OpenMathLib/OpenBLAS.git openblas
+    make -C openblas -j"$(nproc)" NO_LAPACK=1 DYNAMIC_ARCH=1
+    make -C openblas PREFIX="$PREFIX" NO_LAPACK=1 install
+
+    curl -fL "https://fftw.org/fftw-${FFTW_VERSION}.tar.gz" -o fftw.tar.gz
+    tar -xzf fftw.tar.gz
+    cd "fftw-${FFTW_VERSION}"
+    ./configure --prefix="$PREFIX" --enable-shared --enable-threads
+    make -j"$(nproc)"
+    make install
+
+    cd /build
+    # IMCCE-hosted upstream source archive (also listed by Homebrew).
+    curl --fail --location --retry 3 \
+        "https://www.imcce.fr/content/medias/recherche/equipes/asd/calceph/calceph-${CALCEPH_VERSION}.tar.gz" \
+        -o calceph.tar.gz
+    tar -xzf calceph.tar.gz
+    cd "calceph-${CALCEPH_VERSION}"
+    cmake -S . \
+          -B calceph-build \
+          -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+          -DBUILD_SHARED_LIBS=ON
+    cmake --build calceph-build --target all -j"$(nproc)"
+    cmake --build calceph-build --target test -j"$(nproc)"
+    cmake --build calceph-build --target install
+
+    test -f "$PREFIX/include/calceph.h"
+    find "$PREFIX" -maxdepth 3 -name 'libcalceph.so*' -print -quit | grep -q .
+
+
+    cd /build
+    curl -fL "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_1_92_0.tar.bz2" -o boost.tar.bz2
+    tar -xjf boost.tar.bz2
+    cd boost_1_92_0
+    ./bootstrap.sh --prefix="$PREFIX"
+    ./b2 -j"$(nproc)" install
+
+    cd /build
+    git clone "$TEMPO2_REPO" tempo2-src
+    git -C tempo2-src checkout "$TEMPO2_REF"
+    TEMPO2_COMMIT="$(git -C tempo2-src rev-parse HEAD)"
+    cd tempo2-src
+    ./bootstrap
+    ./configure --prefix="$TEMPO2_PREFIX" \
+        --with-blas="-L$PREFIX/lib -lopenblas" \
+        --with-lapack="-L$PREFIX/lib -llapack -lopenblas" \
+        CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib"
+    make -j"$(nproc)"
+    make install
+    make plugins
+    make plugins-install
+    mkdir -p "$TEMPO2/share"
+    cp -a T2runtime/. "$TEMPO2/"
+
+    python3 -m venv /opt/venv
+    /opt/venv/bin/python -m pip install --no-cache-dir \
+        "pip==25.1" "setuptools==79.0.1" "wheel==0.45.1" \
+        "Cython==3.0.12" "setuptools-scm==8.2.1"
+    /opt/venv/bin/python -c 'import pkg_resources'
+    /opt/venv/bin/python -m pip install --no-cache-dir \
+        numpy scipy pandas matplotlib astropy gitpython optuna streamlit \
+        tomlkit tqdm ephem plotly pyarrow
+
+    cd /build
+    git clone https://github.com/vallis/libstempo.git libstempo
+    git -C libstempo checkout "$LIBSTEMPO_REF"
+    SETUPTOOLS_SCM_PRETEND_VERSION=2.5.1 \
+        /opt/venv/bin/python -m pip install --no-build-isolation ./libstempo
+    for item in \
+        "pqc https://github.com/golamshaifullah/pqc.git $PQC_REF" \
+        "pleb https://github.com/golamshaifullah/pleb.git $PLEB_REF" \
+        "whitenoise https://github.com/golamshaifullah/whitenoise.git $WHITENOISE_REF"; do
+        set -- $item
+        git clone "$2" "$1"
+        git -C "$1" checkout "$3"
+        /opt/venv/bin/python -m pip install --no-deps --no-build-isolation "./$1"
+    done
+
+    cat > /opt/container-metadata/dr3-versions.lock <<EOF
+TEMPO2_COMMIT=$TEMPO2_COMMIT
+CALCEPH_VERSION=$CALCEPH_VERSION
+PGPLOT_VERSION=$(dpkg-query -W -f='${Version}' pgplot5)
+GCC_VERSION=$(gcc -dumpfullversion)
+GFORTRAN_VERSION=$(gfortran -dumpfullversion)
+OPENBLAS_VERSION=$OPENBLAS_VERSION
+FFTW_VERSION=$FFTW_VERSION
+BOOST_VERSION=$BOOST_VERSION
+LAPACK_VERSION=$LAPACK_VERSION
+PYTHON=$(python3 --version)
+PIP_VERSION=25.1
+SETUPTOOLS_VERSION=79.0.1
+WHEEL_VERSION=0.45.1
+CYTHON_VERSION=3.0.12
+SETUPTOOLS_SCM_VERSION=8.2.1
+EOF
+    /opt/venv/bin/python -m pip freeze --all | sort > /opt/container-metadata/pip-freeze.txt
+    rm -rf /build /var/lib/apt/lists/* /root/.cache
+
+%environment
+    export TEMPO2_PREFIX=/opt/tempo2
+    export TEMPO2=/opt/tempo2/share/tempo2
+    export PATH=/opt/tempo2/bin:/opt/venv/bin:/opt/dr3/bin:${PATH}
+    export LD_LIBRARY_PATH=/opt/tempo2/lib:/opt/dr3/lib:${LD_LIBRARY_PATH:-}
+    export PKG_CONFIG_PATH=/opt/dr3/lib/pkgconfig:/opt/dr3/lib64/pkgconfig
+    export PGPLOT_DIR=/usr/lib/pgplot5
+    export PGPLOT_FONT=/usr/lib/pgplot5/grfont.dat
+    export XDG_CACHE_HOME=/tmp/xdg-cache
+    export XDG_CONFIG_HOME=/tmp/xdg-config
+    export MPLCONFIGDIR=/tmp/matplotlib
+    export PLEB_LOG_DIR="${TMPDIR:-/tmp}/pleb-logs"
+
+%test
+    set -eux
+    export PLEB_LOG_DIR="${PLEB_LOG_DIR:-${TMPDIR:-/tmp}/pleb-logs}"
+    mkdir -p "$PLEB_LOG_DIR" \
+        "${XDG_CACHE_HOME:-/tmp/xdg-cache}" \
+        "${XDG_CONFIG_HOME:-/tmp/xdg-config}" \
+        "${MPLCONFIGDIR:-/tmp/matplotlib}"
+    test "$(gcc -dumpfullversion)" = 16.2.0
+    test "$(gfortran -dumpfullversion)" = 16.2.0
+    grep -q '^TEMPO2_COMMIT=' /opt/container-metadata/dr3-versions.lock
+    /opt/venv/bin/python -c 'import pkg_resources, libstempo, pleb, pqc'
+    command -v tempo2
+    test -d "$TEMPO2"
+
+%runscript
+    exec "$@"

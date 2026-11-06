@@ -1,0 +1,163 @@
+Bootstrap: localimage
+From: pleb_dr3_upstream.sif
+
+%labels
+    Author Golam Shaifullah
+    Version epta-dr3-discovery-2
+    DiscoveryGitTag 0.5.1
+    EnterpriseVersion 3.5.0
+    EnterpriseCommit c55d2dd94163296c9cffce51f31ef98fc6d9b518
+    PINTVersion 1.1.7
+    CornerVersion 2.3.0
+    ArviZVersion 1.3.0
+    JExploreVersion 0.0.2
+    JExploreCommit d062f6a
+    JAXVersion 0.8.3
+    JAXSourceTag jax-v0.8.3
+    JAXSourceCommitPrefix 2184c1ecb
+    ScikitSparseVersion 0.4.16
+
+%post
+    set -eux
+    export TEMPO2=/opt/tempo2/share/tempo2
+    export PATH=/opt/tempo2/bin:/opt/venv/bin:/opt/dr3/bin:/usr/local/bin:/usr/bin:/bin
+    export LD_LIBRARY_PATH=/opt/tempo2/lib:/opt/dr3/lib:${LD_LIBRARY_PATH:-}
+
+    export DEBIAN_FRONTEND=noninteractive
+    export PLEB_LOG_DIR="${TMPDIR:-/tmp}/pleb-logs"
+    mkdir -p /opt/container-metadata
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        libsuitesparse-dev pkg-config git
+
+    # Keep build frontend compatible with the original base image.
+    /opt/venv/bin/python -m pip install --no-cache-dir --upgrade \
+        "pip==25.1" "setuptools==79.0.1" "wheel==0.45.1" \
+        "Cython==3.0.12" "setuptools-scm==8.2.1"
+
+    # Compiled jaxlib uses the official CPU wheel; building it from Git
+    # requires Bazel/XLA and is not equivalent to a pip source install.
+    /opt/venv/bin/python -m pip install --no-cache-dir "jaxlib==0.8.3"
+
+    # Install the specified top-level Python projects from pinned Git revisions.
+    # Pip still resolves the projects' ordinary transitive dependencies.
+    # Install in one transaction so the resolver checks their combined metadata.
+    /opt/venv/bin/python -m pip install --no-cache-dir \
+        "jax @ git+https://github.com/jax-ml/jax.git@jax-v0.8.3" \
+        "scikit-sparse @ git+https://github.com/scikit-sparse/scikit-sparse.git@v0.4.16" \
+        "pint-pulsar @ git+https://github.com/nanograv/PINT.git@1.1.7" \
+        "corner @ git+https://github.com/dfm/corner.py.git@v2.3.0" \
+        "arviz @ git+https://github.com/arviz-devs/arviz.git@v1.3.0" \
+        "enterprise-pulsar @ git+https://github.com/nanograv/enterprise.git@c55d2dd94163296c9cffce51f31ef98fc6d9b518" \
+        "enterprise_extensions @ git+https://github.com/nanograv/enterprise_extensions.git@b22300bd11335aa0ec206d123db2dd08dde5cef8" \
+        "discovery @ git+https://github.com/nanograv/discovery.git@0.5.1" \
+        "jexplore @ git+https://gitlab.in2p3.fr/lisa-apc/jexplore.git@d062f6a" \
+	"tomli"
+
+    # acor is intentionally not installed; Enterprise 3.5.0 does not require it.
+    /opt/venv/bin/python - <<'PYCODE'
+import importlib.metadata as md
+from packaging.version import Version
+import discovery, enterprise, jax, jexplore
+import sksparse, pint, corner, arviz, enterprise_extensions
+
+expected = {
+    "discovery": "0.5",  # Git tag 0.5.1 defines __version__ = '0.5'
+    "enterprise-pulsar": "3.5.0",
+    "enterprise_extensions": "3.0.2",
+    "pint-pulsar": "1.1.7",
+    "corner": "2.3.0",
+    "arviz": "1.3.0",
+    "jax": "0.8.3",  # compare base version; Git source reports a .dev build
+    "jaxlib": "0.8.3",
+    "scikit-sparse": "0.4.16",
+    "jexplore": "0.0.2",
+}
+for package, version in expected.items():
+    installed = md.version(package)
+    if package == "jax":
+        # The jax-v0.8.3 Git tag builds as 0.8.3.devYYYYMMDD+<sha>.
+        # Verify the base version here and the Git commit below.
+        assert Version(installed).base_version == version, (
+            f"{package}: expected base version {version}, got {installed}"
+        )
+    else:
+        assert installed == version, f"{package}: expected {version}, got {installed}"
+
+# Ensure source origin is captured for each Git-installed top-level package.
+import json
+for package in ("jax", "scikit-sparse", "pint-pulsar", "corner", "arviz",
+                "enterprise-pulsar", "enterprise_extensions", "discovery", "jexplore"):
+    dist = md.distribution(package)
+    source = dist.read_text('direct_url.json')
+    assert source, f"{package}: missing source provenance"
+    meta = json.loads(source)
+    assert meta.get("vcs_info", {}).get("vcs") == "git", f"{package}: not from Git"
+    if package == "jax":
+        # Release tag jax-v0.8.3 resolves to commit 2184c1e... .
+        sha = meta["vcs_info"].get("commit_id", "")
+        assert sha.startswith("2184c1ecb"), (
+            f"jax: unexpected Git commit {sha}; wanted jax-v0.8.3"
+        )
+    print(f"{package}: {md.version(package)} from {meta['url']} "
+          f"at {meta['vcs_info'].get('commit_id', 'unknown')}")
+PYCODE
+
+    /opt/venv/bin/python -m pip check
+    /opt/venv/bin/python -m pip freeze --all | sort \
+        > /opt/container-metadata/pip-freeze-discovery.txt
+
+    # Metadata distinguishes upstream tags from normalized Python versions.
+    cat > /opt/container-metadata/analysis-sources.lock <<'EOF'
+JAX_REPO=https://github.com/jax-ml/jax.git
+JAX_TAG=jax-v0.8.3
+JAX_COMMIT_PREFIX=2184c1ecb
+JAXLIB_WHEEL_VERSION=0.8.3
+SCIKIT_SPARSE_REPO=https://github.com/scikit-sparse/scikit-sparse.git
+SCIKIT_SPARSE_TAG=v0.4.16
+PINT_REPO=https://github.com/nanograv/PINT.git
+PINT_TAG=1.1.7
+CORNER_REPO=https://github.com/dfm/corner.py.git
+CORNER_TAG=v2.3.0
+ARVIZ_REPO=https://github.com/arviz-devs/arviz.git
+ARVIZ_TAG=v1.3.0
+ENTERPRISE_REPO=https://github.com/nanograv/enterprise.git
+ENTERPRISE_COMMIT=c55d2dd94163296c9cffce51f31ef98fc6d9b518
+ENTERPRISE_EXTENSIONS_REPO=https://github.com/nanograv/enterprise_extensions.git
+ENTERPRISE_EXTENSIONS_COMMIT=b22300bd11335aa0ec206d123db2dd08dde5cef8
+DISCOVERY_REPO=https://github.com/nanograv/discovery.git
+DISCOVERY_TAG=0.5.1
+DISCOVERY_PACKAGE_VERSION=0.5
+JEXPLORE_REPO=https://gitlab.in2p3.fr/lisa-apc/jexplore.git
+JEXPLORE_COMMIT=d062f6a
+ACOR=not-requested
+EOF
+    rm -rf /var/lib/apt/lists/* /root/.cache
+
+%environment
+    export TEMPO2_PREFIX=/opt/tempo2
+    export TEMPO2=/opt/tempo2/share/tempo2
+    export PATH=/opt/tempo2/bin:/opt/venv/bin:/opt/dr3/bin:${PATH}
+    export LD_LIBRARY_PATH=/opt/tempo2/lib:/opt/dr3/lib:${LD_LIBRARY_PATH:-}
+    export XDG_CACHE_HOME=/tmp/xdg-cache
+    export XDG_CONFIG_HOME=/tmp/xdg-config
+    export MPLCONFIGDIR=/tmp/matplotlib
+    export PLEB_LOG_DIR="${TMPDIR:-/tmp}/pleb-logs"
+
+%test
+    set -eux
+    export PLEB_LOG_DIR="${PLEB_LOG_DIR:-${TMPDIR:-/tmp}/pleb-logs}"
+    mkdir -p "$PLEB_LOG_DIR" \
+        "${XDG_CACHE_HOME:-/tmp/xdg-cache}" \
+        "${XDG_CONFIG_HOME:-/tmp/xdg-config}" \
+        "${MPLCONFIGDIR:-/tmp/matplotlib}"
+    /opt/venv/bin/python -c 'import discovery, enterprise, enterprise_extensions, jax, jexplore, libstempo, pleb'
+    /opt/venv/bin/python -m pip check
+    test -s /opt/container-metadata/dr3-versions.lock
+    test -s /opt/container-metadata/pip-freeze-discovery.txt
+    test -s /opt/container-metadata/analysis-sources.lock
+
+%runscript
+    exec "$@"
+    
