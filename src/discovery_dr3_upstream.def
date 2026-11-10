@@ -53,13 +53,14 @@ From: pleb_dr3_upstream.sif
         "enterprise_extensions @ git+https://github.com/nanograv/enterprise_extensions.git@b22300bd11335aa0ec206d123db2dd08dde5cef8" \
         "discovery @ git+https://github.com/nanograv/discovery.git@0.5.1" \
         "jexplore @ git+https://gitlab.in2p3.fr/lisa-apc/jexplore.git@d062f6a" \
+        "numpyro @ git+https://github.com/pyro-ppl/numpyro@0.22.0" \
 	"tomli"
 
     # acor is intentionally not installed; Enterprise 3.5.0 does not require it.
     /opt/venv/bin/python - <<'PYCODE'
 import importlib.metadata as md
 from packaging.version import Version
-import discovery, enterprise, jax, jexplore
+import discovery, enterprise, jax, jexplore, numpyro
 import sksparse, pint, corner, arviz, enterprise_extensions
 
 expected = {
@@ -73,6 +74,7 @@ expected = {
     "jaxlib": "0.8.3",
     "scikit-sparse": "0.4.16",
     "jexplore": "0.0.2",
+    "numpyro": "0.22.0",
 }
 for package, version in expected.items():
     installed = md.version(package)
@@ -88,7 +90,7 @@ for package, version in expected.items():
 # Ensure source origin is captured for each Git-installed top-level package.
 import json
 for package in ("jax", "scikit-sparse", "pint-pulsar", "corner", "arviz",
-                "enterprise-pulsar", "enterprise_extensions", "discovery", "jexplore"):
+                "enterprise-pulsar", "enterprise_extensions", "discovery", "jexplore", "numpyro"):
     dist = md.distribution(package)
     source = dist.read_text('direct_url.json')
     assert source, f"{package}: missing source provenance"
@@ -131,6 +133,8 @@ DISCOVERY_TAG=0.5.1
 DISCOVERY_PACKAGE_VERSION=0.5
 JEXPLORE_REPO=https://gitlab.in2p3.fr/lisa-apc/jexplore.git
 JEXPLORE_COMMIT=d062f6a
+NUMPYRO_REPO=https://github.com/pyro-ppl/numpyro.git
+NUMPYRO_COMMIT=1e5c0bf
 ACOR=not-requested
 EOF
     rm -rf /var/lib/apt/lists/* /root/.cache
@@ -152,7 +156,7 @@ EOF
         "${XDG_CACHE_HOME:-/tmp/xdg-cache}" \
         "${XDG_CONFIG_HOME:-/tmp/xdg-config}" \
         "${MPLCONFIGDIR:-/tmp/matplotlib}"
-    /opt/venv/bin/python -c 'import discovery, enterprise, enterprise_extensions, jax, jexplore, libstempo, pleb'
+    /opt/venv/bin/python -c 'import discovery, enterprise, enterprise_extensions, jax, jexplore, libstempo, pleb, numpyro'
     /opt/venv/bin/python -m pip check
     test -s /opt/container-metadata/dr3-versions.lock
     test -s /opt/container-metadata/pip-freeze-discovery.txt
