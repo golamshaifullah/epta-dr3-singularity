@@ -20,6 +20,7 @@
 |PINT	|https://github.com/nanograv/PINT	|1.1.7	|hippolyte	||
 |corner	|https://github.com/dfm/corner.py	|2.3.0	|hippolyte	||
 |arziv	|https://github.com/arviz-devs/arviz	|1.3.0	|hippolyte	||
+|numpyro	|https://github.com/pyro-ppl/numpyro	|0.22.0	|hippolyte	||
 |	|	|	|	||
 |Discovery	|https://github.com/nanograv/discovery	|0.5.1	|golam	||
 |jexplore	|https://gitlab.in2p3.fr/lisa-apc/jexplore	|0.0.2 (d062f6a)	|francesco	||
