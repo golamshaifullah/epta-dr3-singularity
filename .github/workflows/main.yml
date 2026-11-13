@@ -50,9 +50,9 @@ jobs:
           shopt -s nullglob
           recipes=(src/*_upstream.def)
           [[ ${#recipes[@]} -eq 2 ]] || { echo "Expected exactly 2 recipes"; exit 1; }
-          [[ -f src/pleb_dr3_upstream.def ]] || { echo "Missing base recipe"; exit 1; }
+          [[ -f src/01_pleb_dr3_upstream.def ]] || { echo "Missing base recipe"; exit 1; }
           for recipe in "${recipes[@]}"; do
-            if [[ "$recipe" != src/pleb_dr3_upstream.def ]]; then
+            if [[ "$recipe" != src/01_pleb_dr3_upstream.def ]]; then
               echo "dependent_recipe=$recipe" >> "$GITHUB_OUTPUT"
               echo "dependent_image=$(basename "$recipe" .def).sif" >> "$GITHUB_OUTPUT"
             fi
@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           image=pleb_dr3_upstream.sif
-          recipe=src/pleb_dr3_upstream.def
+          recipe=src/01_pleb_dr3_upstream.def
           recipe_hash=$(sha256sum "$recipe" | cut -d' ' -f1)
           artifact="apptainer-base-${recipe_hash}"
           echo "artifact_name=$artifact" >> "$GITHUB_OUTPUT"
