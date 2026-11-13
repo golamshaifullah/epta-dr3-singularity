@@ -1,25 +1,62 @@
-
 name: Build Apptainer Images
 
 on:
-  # Manual execution through GitHub Actions
   workflow_dispatch:
+    inputs:
+      stage:
+        description: "Which image(s) to build?"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - base
+          - dependent
+      force_rebuild:
+        description: "Rebuild selected image(s) even if unchanged"
+        type: boolean
+        required: false
+        default: false
 
-  # Execute only when a GitHub Release is published
   release:
     types: [published]
+
 permissions:
-  contents: read
+  actions: read
+  contents: write   # Required to attach .sif files to a Release
+
+concurrency:
+  group: apptainer-images
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build upstream images
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_STAGE: ${{ github.event_name == 'release' && 'all' || inputs.stage }}
+      FORCE_REBUILD: ${{ inputs.force_rebuild || false }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Identify recipes
+        id: recipes
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          recipes=(src/*_upstream.def)
+          [[ ${#recipes[@]} -eq 2 ]] || { echo "Expected exactly 2 recipes"; exit 1; }
+          [[ -f src/pleb_dr3_upstream.def ]] || { echo "Missing base recipe"; exit 1; }
+          for recipe in "${recipes[@]}"; do
+            if [[ "$recipe" != src/pleb_dr3_upstream.def ]]; then
+              echo "dependent_recipe=$recipe" >> "$GITHUB_OUTPUT"
+              echo "dependent_image=$(basename "$recipe" .def).sif" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
       - name: Install Apptainer
         run: |
@@ -30,37 +67,103 @@ jobs:
           sudo apt-get install -y apptainer
           apptainer --version
 
-      - name: Build images sequentially
+      - name: Restore or build base image
+        id: base
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          image=pleb_dr3_upstream.sif
+          recipe=src/pleb_dr3_upstream.def
+          recipe_hash=$(sha256sum "$recipe" | cut -d' ' -f1)
+          artifact="apptainer-base-${recipe_hash}"
+          echo "artifact_name=$artifact" >> "$GITHUB_OUTPUT"
+          rm -f "$image"
 
-          mkdir -p dist
-
-          recipes=(src/*_upstream.def)
-
-          if [ "${#recipes[@]}" -ne 2 ]; then
-            echo "Expected exactly 2 recipes, found ${#recipes[@]}"
-            exit 1
+          force_base=false
+          if [[ "$FORCE_REBUILD" == true && "$BUILD_STAGE" != dependent ]]; then
+            force_base=true
+          fi
+          if [[ "$force_base" == false ]]; then
+            run_id=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" \
+              -f "name=$artifact" -f per_page=100 \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty')
+            if [[ -n "$run_id" ]]; then
+              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$image"
+            fi
           fi
 
-          for recipe in "${recipes[@]}"; do
-            name=$(basename "$recipe" .def)
-            echo "Building $recipe..."
-            
-            sudo apptainer build \
-              "dist/${name}.sif" \
-              "$recipe"
+          if [[ ! -s "$image" ]]; then
+            echo "Building $image"
+            sudo apptainer build "$image" "$recipe"
+            sudo chmod a+r "$image"
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Reusing $image from a previous workflow run"
+          fi
 
-            echo "Built dist/${name}.sif"
-          done
+      - name: Restore or build dependent image
+        if: env.BUILD_STAGE != 'base'
+        id: dependent
+        shell: bash
+        env:
+          RECIPE: ${{ steps.recipes.outputs.dependent_recipe }}
+          IMAGE: ${{ steps.recipes.outputs.dependent_image }}
+        run: |
+          set -euo pipefail
+          recipe_hash=$(sha256sum "$RECIPE" | cut -d' ' -f1)
+          base_hash=$(sha256sum pleb_dr3_upstream.sif | cut -d' ' -f1)
+          artifact="apptainer-dependent-${recipe_hash}-${base_hash}"
+          echo "artifact_name=$artifact" >> "$GITHUB_OUTPUT"
+          rm -f "$IMAGE"
 
-      - name: Upload built images
+          if [[ "$FORCE_REBUILD" != true ]]; then
+            run_id=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" \
+              -f "name=$artifact" -f per_page=100 \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty')
+            if [[ -n "$run_id" ]]; then
+              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$IMAGE"
+            fi
+          fi
+
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "Building $IMAGE"
+            sudo apptainer build "$IMAGE" "$RECIPE"
+            sudo chmod a+r "$IMAGE"
+          else
+            echo "Reusing $IMAGE from a previous workflow run"
+          fi
+
+      - name: Upload base image artifact
+        if: env.BUILD_STAGE != 'dependent' || steps.base.outputs.built == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: apptainer-images
-          path: dist/*.sif
+          name: ${{ steps.base.outputs.artifact_name }}
+          path: pleb_dr3_upstream.sif
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Upload dependent image artifact
+        if: env.BUILD_STAGE != 'base'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dependent.outputs.artifact_name }}
+          path: ${{ steps.recipes.outputs.dependent_image }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Attach images to GitHub Release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          DEPENDENT_IMAGE: ${{ steps.recipes.outputs.dependent_image }}
+        run: |
+          set -euo pipefail
+          for file in pleb_dr3_upstream.sif "$DEPENDENT_IMAGE"; do
+            if (( $(stat -c %s "$file") >= 2147483648 )); then
+              echo "::warning::$file is at least 2 GiB; GitHub Release assets cannot hold it. Use the Actions artifact."
+            else
+              gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+            fi
+          done
