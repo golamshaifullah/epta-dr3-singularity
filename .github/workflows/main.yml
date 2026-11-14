@@ -22,8 +22,11 @@ on:
     types: [published]
 
 permissions:
-  actions: read
-  contents: write   # Required to attach .sif files to a Release
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: apptainer-images
@@ -132,6 +135,38 @@ jobs:
           else
             echo "Reusing $IMAGE from a previous workflow run"
           fi
+
+
+      - name: Publish containers to GHCR
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$GH_TOKEN" |
+            apptainer registry login \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin \
+              docker://ghcr.io
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${GITHUB_REF_NAME}"
+
+          for image in ./*.sif; do
+            [ -f "$image" ] || continue
+
+            name=$(basename "$image" .sif)
+
+            apptainer push "$image" \
+              "oras://ghcr.io/${owner}/${name}:${tag}"
+          done
+
+      - name: Attest container provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: "*.sif"
 
       - name: Upload base image artifact
         if: env.BUILD_STAGE != 'dependent' || steps.base.outputs.built == 'true'
