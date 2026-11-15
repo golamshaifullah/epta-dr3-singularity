@@ -1,3 +1,4 @@
+
 name: Build Apptainer Images
 
 on:
@@ -21,12 +22,8 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+# Permissions are scoped to each job below.
+permissions: {}
 
 concurrency:
   group: apptainer-images
@@ -34,8 +31,15 @@ concurrency:
 
 jobs:
   build:
+    name: Build upstream images
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       GH_TOKEN: ${{ github.token }}
       BUILD_STAGE: ${{ github.event_name == 'release' && 'all' || inputs.stage }}
@@ -43,7 +47,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Identify recipes
         id: recipes
@@ -52,14 +58,52 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           recipes=(src/*_upstream.def)
-          [[ ${#recipes[@]} -eq 2 ]] || { echo "Expected exactly 2 recipes"; exit 1; }
-          [[ -f src/01_pleb_dr3_upstream.def ]] || { echo "Missing base recipe"; exit 1; }
+
+          printf 'Found recipes:\n'
+          printf '  %s\n' "${recipes[@]}"
+          if [[ ${#recipes[@]} -ne 2 ]]; then
+            echo "::error::Expected exactly two src/*_upstream.def recipes; found ${#recipes[@]}"
+            exit 1
+          fi
+
+          # Identify which recipe uses the other image as a local base.
+          base_recipe=""
+          dependent_recipe=""
           for recipe in "${recipes[@]}"; do
-            if [[ "$recipe" != src/01_pleb_dr3_upstream.def ]]; then
-              echo "dependent_recipe=$recipe" >> "$GITHUB_OUTPUT"
-              echo "dependent_image=$(basename "$recipe" .def).sif" >> "$GITHUB_OUTPUT"
+            if grep -Eiq '^[[:space:]]*Bootstrap:[[:space:]]*localimage([[:space:]]|$)' "$recipe"; then
+              if [[ -n "$dependent_recipe" ]]; then
+                echo "::error::Expected exactly one localimage recipe"
+                exit 1
+              fi
+              dependent_recipe="$recipe"
+            else
+              base_recipe="$recipe"
             fi
           done
+
+          if [[ -z "$base_recipe" || -z "$dependent_recipe" ]]; then
+            echo "::error::Could not determine build order. Exactly one recipe must contain 'Bootstrap: localimage'."
+            exit 1
+          fi
+
+          # Build the base .sif under the name expected by the dependent From: line.
+          from_image=$(awk 'tolower($1)=="from:" {print $2; exit}' "$dependent_recipe")
+          base_image="${from_image#./}"
+          if [[ -z "$base_image" || "$base_image" != *.sif || "$base_image" == */* ]]; then
+            echo "::error::Expected 'From: image.sif' in $dependent_recipe, but got '$from_image'."
+            echo "::error::Use a plain .sif filename in the repository root, not a path into dist/."
+            exit 1
+          fi
+
+          dependent_image="$(basename "$dependent_recipe" .def).sif"
+          echo "Base: $base_recipe -> $base_image"
+          echo "Dependent: $dependent_recipe -> $dependent_image"
+          {
+            echo "base_recipe=$base_recipe"
+            echo "base_image=$base_image"
+            echo "dependent_recipe=$dependent_recipe"
+            echo "dependent_image=$dependent_image"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Apptainer
         run: |
@@ -73,114 +117,111 @@ jobs:
       - name: Restore or build base image
         id: base
         shell: bash
+        env:
+          BASE_RECIPE: ${{ steps.recipes.outputs.base_recipe }}
+          BASE_IMAGE: ${{ steps.recipes.outputs.base_image }}
         run: |
           set -euo pipefail
-          image=pleb_dr3_upstream.sif
-          recipe=src/01_pleb_dr3_upstream.def
-          recipe_hash=$(sha256sum "$recipe" | cut -d' ' -f1)
+          recipe_hash=$(sha256sum "$BASE_RECIPE" | cut -d' ' -f1)
           artifact="apptainer-base-${recipe_hash}"
           echo "artifact_name=$artifact" >> "$GITHUB_OUTPUT"
-          rm -f "$image"
+          rm -f "$BASE_IMAGE"
 
           force_base=false
           if [[ "$FORCE_REBUILD" == true && "$BUILD_STAGE" != dependent ]]; then
             force_base=true
           fi
+
           if [[ "$force_base" == false ]]; then
             run_id=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" \
               -f "name=$artifact" -f per_page=100 \
               --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty')
             if [[ -n "$run_id" ]]; then
-              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$image"
+              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$BASE_IMAGE"
             fi
           fi
 
-          if [[ ! -s "$image" ]]; then
-            echo "Building $image"
-            sudo apptainer build "$image" "$recipe"
-            sudo chmod a+r "$image"
+          # Reject artifacts from older workflows that have no verifiable provenance.
+          if [[ -s "$BASE_IMAGE" ]] && ! gh attestation verify "$BASE_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/main.yaml"; then
+            echo "::warning::Unverified cached base image; rebuilding."
+            rm -f "$BASE_IMAGE"
+          fi
+
+          if [[ ! -s "$BASE_IMAGE" ]]; then
+            echo "Building $BASE_IMAGE from $BASE_RECIPE"
+            sudo apptainer build "$BASE_IMAGE" "$BASE_RECIPE"
+            sudo chmod a+r "$BASE_IMAGE"
             echo "built=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Reusing $image from a previous workflow run"
+            echo "Reusing $BASE_IMAGE from a previous workflow run"
           fi
+
+      - name: Attest unsigned base image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.recipes.outputs.base_image }}
 
       - name: Restore or build dependent image
         if: env.BUILD_STAGE != 'base'
         id: dependent
         shell: bash
         env:
-          RECIPE: ${{ steps.recipes.outputs.dependent_recipe }}
-          IMAGE: ${{ steps.recipes.outputs.dependent_image }}
+          DEPENDENT_RECIPE: ${{ steps.recipes.outputs.dependent_recipe }}
+          DEPENDENT_IMAGE: ${{ steps.recipes.outputs.dependent_image }}
+          BASE_IMAGE: ${{ steps.recipes.outputs.base_image }}
         run: |
           set -euo pipefail
-          recipe_hash=$(sha256sum "$RECIPE" | cut -d' ' -f1)
-          base_hash=$(sha256sum pleb_dr3_upstream.sif | cut -d' ' -f1)
+          recipe_hash=$(sha256sum "$DEPENDENT_RECIPE" | cut -d' ' -f1)
+          base_hash=$(sha256sum "$BASE_IMAGE" | cut -d' ' -f1)
           artifact="apptainer-dependent-${recipe_hash}-${base_hash}"
           echo "artifact_name=$artifact" >> "$GITHUB_OUTPUT"
-          rm -f "$IMAGE"
+          rm -f "$DEPENDENT_IMAGE"
 
           if [[ "$FORCE_REBUILD" != true ]]; then
             run_id=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" \
               -f "name=$artifact" -f per_page=100 \
               --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id // empty')
             if [[ -n "$run_id" ]]; then
-              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$IMAGE"
+              gh run download "$run_id" --name "$artifact" --dir . || rm -f "$DEPENDENT_IMAGE"
             fi
           fi
 
-          if [[ ! -s "$IMAGE" ]]; then
-            echo "Building $IMAGE"
-            sudo apptainer build "$IMAGE" "$RECIPE"
-            sudo chmod a+r "$IMAGE"
-          else
-            echo "Reusing $IMAGE from a previous workflow run"
+          # Authenticate any previously built image before it can be released.
+          if [[ -s "$DEPENDENT_IMAGE" ]] && ! gh attestation verify "$DEPENDENT_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/main.yaml"; then
+            echo "::warning::Unverified cached dependent image; rebuilding."
+            rm -f "$DEPENDENT_IMAGE"
           fi
 
+          if [[ ! -s "$DEPENDENT_IMAGE" ]]; then
+            echo "Building $DEPENDENT_IMAGE from $DEPENDENT_RECIPE"
+            sudo apptainer build "$DEPENDENT_IMAGE" "$DEPENDENT_RECIPE"
+            sudo chmod a+r "$DEPENDENT_IMAGE"
+          else
+            echo "Reusing $DEPENDENT_IMAGE from a previous workflow run"
+          fi
 
-      - name: Publish containers to GHCR
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          printf '%s' "$GH_TOKEN" |
-            apptainer registry login \
-              --username "$GITHUB_ACTOR" \
-              --password-stdin \
-              docker://ghcr.io
-
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          tag="${GITHUB_REF_NAME}"
-
-          for image in ./*.sif; do
-            [ -f "$image" ] || continue
-
-            name=$(basename "$image" .sif)
-
-            apptainer push "$image" \
-              "oras://ghcr.io/${owner}/${name}:${tag}"
-          done
-
-      - name: Attest container provenance
-        uses: actions/attest@v4
+      - name: Attest unsigned dependent image
+        if: env.BUILD_STAGE != 'base'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: "*.sif"
+          subject-path: ${{ steps.recipes.outputs.dependent_image }}
 
       - name: Upload base image artifact
-        if: env.BUILD_STAGE != 'dependent' || steps.base.outputs.built == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.base.outputs.artifact_name }}
-          path: pleb_dr3_upstream.sif
+          path: ${{ steps.recipes.outputs.base_image }}
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
 
       - name: Upload dependent image artifact
         if: env.BUILD_STAGE != 'base'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.dependent.outputs.artifact_name }}
           path: ${{ steps.recipes.outputs.dependent_image }}
@@ -188,17 +229,122 @@ jobs:
           retention-days: 30
           compression-level: 0
 
-      - name: Attach images to GitHub Release
-        if: github.event_name == 'release'
+  publish:
+    name: Verify, attest and publish release images
+    if: github.event_name == 'release'
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      # Do not check out the repository or run its scripts in this job.
+      - name: Download images from this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: apptainer-*
+          merge-multiple: true
+          path: .
+
+      - name: Install Apptainer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer --version
+
+      - name: Verify and checksum images
         shell: bash
         env:
-          DEPENDENT_IMAGE: ${{ steps.recipes.outputs.dependent_image }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for file in pleb_dr3_upstream.sif "$DEPENDENT_IMAGE"; do
-            if (( $(stat -c %s "$file") >= 2147483648 )); then
-              echo "::warning::$file is at least 2 GiB; GitHub Release assets cannot hold it. Use the Actions artifact."
+          shopt -s nullglob
+          images=(./*.sif)
+          if [[ ${#images[@]} -ne 2 ]]; then
+            echo "::error::Expected exactly two SIF files, got ${#images[@]}"
+            exit 1
+          fi
+
+          for image in "${images[@]}"; do
+            test -s "$image"
+            # Check SIF structure without running the image.
+            apptainer sif list "$image" >/dev/null
+            # Reject images without cryptographically verified build provenance.
+            gh attestation verify "$image" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/main.yaml"
+          done
+
+          # No post-attestation mutation: release the very bytes that were checked.
+          sha256sum -- "${images[@]}" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      # Keyless OIDC/Sigstore provenance, no PEM or long-lived signing secret.
+      - name: Attest release images and checksums
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            *.sif
+            SHA256SUMS
+
+      - name: Upload verified workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-apptainer-images
+          path: |
+            *.sif
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish images to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # OCI tags cannot contain slashes or other arbitrary Git ref characters.
+          if [[ ! "$GITHUB_REF_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Release tag is not a valid OCI tag: $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          printf '%s' "$GH_TOKEN" | apptainer registry login \
+            --username "$GITHUB_ACTOR" --password-stdin docker://ghcr.io
+
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          for image in ./*.sif; do
+            name=$(basename "$image" .sif)
+            destination="oras://${prefix}/${name}:${GITHUB_REF_NAME}"
+            echo "Publishing $destination"
+            apptainer push --allow-unsigned "$image" "$destination"
+          done
+
+      - name: Attach images and checksums to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub Release assets must be smaller than 2 GiB each.
+          assets=(SHA256SUMS)
+          for image in ./*.sif; do
+            if (( $(stat -c %s "$image") >= 2147483648 )); then
+              echo "::warning::$image is >= 2 GiB; available through GHCR and Actions instead."
             else
-              gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+              assets+=("$image")
             fi
           done
+          # No --clobber: do not silently replace an existing release asset.
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}"
