@@ -24,9 +24,9 @@ You can pull a prebuilt image from the ghcr.
 `apptainer pull pleb_dr3_upstream.sif oras://ghcr.io/OWNER/epta-dr3-singularity/pleb_dr3_upstream:v1.0.0`
 
 Verify that this image was not tampered with:
-`gh attestation verify pleb_dr3_upstream.sif \
-  --repo OWNER/epta-dr3-singularity \
-  --signer-workflow OWNER/epta-dr3-singularity/.github/workflows/main.yaml \
+`gh attestation verify pleb_dr3_upstream.sif \\
+  --repo OWNER/epta-dr3-singularity \\
+  --signer-workflow OWNER/epta-dr3-singularity/.github/workflows/main.yaml \\
   --source-ref refs/tags/v1.0.0`
   
 Although I have made a best effort (security-wise) setup, this is not preferred for running on very critical infrastructure. If in doubt check with your HPC admin. The authors do not bear any responsibility to issues arising from the use of these prebuilt images.
