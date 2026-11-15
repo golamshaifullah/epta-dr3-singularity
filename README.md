@@ -8,10 +8,14 @@ You must have access to a linux host with appatainer or singularity. When runnin
 To build from scratch (preferred) clone this repo on your host. Build the image using :
 
 Build the 'base' image:
-`apptainer build --fakeroot pleb_dr3_upstream.sif 01_pleb_dr3_upstream.def`
+```
+apptainer build --fakeroot pleb_dr3_upstream.sif 01_pleb_dr3_upstream.def
+```
 
 and then build then second layer.
-`apptainer build --fakeroot discovery_dr3_upstream.sif 02_discovery_dr3_upstream.def`
+```
+apptainer build --fakeroot discovery_dr3_upstream.sif 02_discovery_dr3_upstream.def
+```
 
 
 You _must_ build the images in this order and using these image names.
@@ -21,7 +25,9 @@ You _must_ build the images in this order and using these image names.
 
 You can pull a prebuilt image from the ghcr. 
 
-`apptainer pull pleb_dr3_upstream.sif oras://ghcr.io/OWNER/epta-dr3-singularity/pleb_dr3_upstream:v1.0.0`
+```
+apptainer pull pleb_dr3_upstream.sif oras://ghcr.io/OWNER/epta-dr3-singularity/pleb_dr3_upstream:v1.0.0
+```
 
 Verify that this image was not tampered with:
 ```
