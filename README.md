@@ -1,6 +1,34 @@
 # This is the repo containing recipes to build contianers for epta dr3 analysis. The included software and their versions are:
 
+## Requirements
+You must have access to a linux host with appatainer or singularity. When running on HPC please ensure your HPC allows you to pull containers from the GHCR 
 
+## Using the cntainers
+
+To build from scratch (preferred) clone this repo on your host. Build the image using :
+
+`apptainer build --fakeroot pleb_dr3_upstream.sif 01_pleb_dr3_upstream.def`
+`apptainer build --fakeroot discovery_dr3_upstream.sif 02_discovery_dr3_upstream.def`
+
+
+You _must_ build the images in this order and using these image names.
+
+
+## Obtaining a prebuilt image
+
+You can pull a prebuilt image from the ghcr. 
+
+`apptainer pull pleb_dr3_upstream.sif oras://ghcr.io/OWNER/epta-dr3-singularity/pleb_dr3_upstream:v1.0.0`
+
+Verify that this image was not tampered with:
+`gh attestation verify pleb_dr3_upstream.sif \
+  --repo OWNER/epta-dr3-singularity \
+  --signer-workflow OWNER/epta-dr3-singularity/.github/workflows/main.yaml \
+  --source-ref refs/tags/v1.0.0`
+  
+Although I have made a best effort (security-wise) setup, this is not preferred for running on very critical infrastructure. If in doubt check with your HPC admin. The authors do not bear any responsibility to issues arising from the use of these prebuilt images.
+
+## Software table
 
 |Software	|url	|version / git-hash	|submitter	|comment|
 |---------------|-------|-----------------------|---------------|-----------|
@@ -25,9 +53,3 @@
 |Discovery	|https://github.com/nanograv/discovery	|0.5.1	|golam	||
 |jexplore	|https://gitlab.in2p3.fr/lisa-apc/jexplore	|0.0.2 (d062f6a)	|francesco	||
 |JAX / jaxlib	|https://github.com/jax-ml/jax	|0.8.3	|francesco	||
-
-These were collected here: 
-https://docs.google.com/spreadsheets/d/1KCRnNiptTME39Hnc3erUnC0RWz2hrgGRQcRcSmHeWXw/edit?usp=sharing
-
-
-
