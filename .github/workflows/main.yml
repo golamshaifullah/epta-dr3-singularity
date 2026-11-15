@@ -262,7 +262,7 @@ jobs:
           sudo apt-get install -y apptainer
           apptainer --version
 
-      - name: Verify and checksum images
+      - name: Verify images
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -285,8 +285,34 @@ jobs:
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/main.yaml"
           done
 
-          # No post-attestation mutation: release the very bytes that were checked.
-          sha256sum -- "${images[@]}" > SHA256SUMS
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.54.0
+
+      - name: Generate image SBOMs and checksums
+        shell: bash
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(./*.sif)
+          if [[ ${#images[@]} -ne 2 ]]; then
+            echo "::error::Expected exactly two SIF files"
+            exit 1
+          fi
+          mkdir -p sbom
+
+          for image in "${images[@]}"; do
+            name=$(basename "$image")
+            "$SYFT" scan --from singularity "$image" \
+              -o "spdx-json=sbom/${name}.spdx.json"
+          done
+
+          # The checksums cover the exact images and their generated SBOMs.
+          sha256sum -- "${images[@]}" sbom/*.spdx.json > SHA256SUMS
           sha256sum -c SHA256SUMS
 
       # Keyless OIDC/Sigstore provenance, no PEM or long-lived signing secret.
@@ -295,6 +321,7 @@ jobs:
         with:
           subject-path: |
             *.sif
+            sbom/*.spdx.json
             SHA256SUMS
 
       - name: Upload verified workflow artifacts
@@ -303,6 +330,7 @@ jobs:
           name: release-apptainer-images
           path: |
             *.sif
+            sbom/*.spdx.json
             SHA256SUMS
           if-no-files-found: error
           retention-days: 30
@@ -331,14 +359,14 @@ jobs:
             apptainer push --allow-unsigned "$image" "$destination"
           done
 
-      - name: Attach images and checksums to GitHub Release
+      - name: Attach images, SBOMs and checksums to GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # GitHub Release assets must be smaller than 2 GiB each.
-          assets=(SHA256SUMS)
+          assets=(SHA256SUMS sbom/*.spdx.json)
           for image in ./*.sif; do
             if (( $(stat -c %s "$image") >= 2147483648 )); then
               echo "::warning::$image is >= 2 GiB; available through GHCR and Actions instead."
