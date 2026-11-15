@@ -1,4 +1,4 @@
-# This is the repo containing recipes to build contianers for epta dr3 analysis. The included software and their versions are:
+# This is the repo containing recipes to build containers for the European Pulsar Timing Array's third data release linked (EPTA DR3) analyses. The included software and their versions are listed in the Software Table.
 
 ## Requirements
 You must have access to a linux host with appatainer or singularity. When running on HPC please ensure your HPC allows you to pull containers from the GHCR 
