@@ -64,3 +64,12 @@ Although I have made a best effort (security-wise) setup, this is not preferred 
 |Discovery	|https://github.com/nanograv/discovery	|0.5.1	|golam	||
 |jexplore	|https://gitlab.in2p3.fr/lisa-apc/jexplore	|0.0.2 (d062f6a)	|francesco	||
 |JAX / jaxlib	|https://github.com/jax-ml/jax	|0.8.3	|francesco	||
+
+
+## License
+
+The original Apptainer definition files, GitHub Actions workflows, and associated scripts in this repository are licensed under the BSD 3-Clause License. See [LICENSE](LICENSE) for details.
+
+The generated Apptainer/Singularity container images (`.sif`) contain third-party software distributed under its respective licenses. The BSD 3-Clause License of this repository does not supersede or replace those licenses.
+
+Users and redistributors are responsible for complying with the applicable third-party license terms.
